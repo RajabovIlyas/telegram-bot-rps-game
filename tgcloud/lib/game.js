@@ -2,15 +2,17 @@
 // private messages with the bot, and the 30-second move deadline.
 //
 // The runtime has no timers, so an overdue round is closed by whatever update
-// arrives next: every handler calls sweepExpired() first, and the round message
-// in the group has a "time's up?" button for when the chat is quiet.
+// arrives next: every handler calls sweepExpired() first, and a player who has
+// moved gets a "time's up?" button in their private chat for when it's quiet.
+//
+// The group sees only the lobby and the final result; rounds stay in private.
 
 import { db, api } from 'sdk';
 import { eq, and, lt, asc, desc, inArray, isNotNull, sql } from 'sdk/db';
 import { games, gamePlayers, players } from '../schema.js';
 import {
   MOVES, ROUND_SECONDS, moveLabel, winningMoves,
-  escapeHtml, displayName, botLink, safeEdit,
+  escapeHtml, displayName, safeEdit,
 } from './rps.js';
 
 export const TARGETS = [1, 2, 3, 5];
@@ -45,10 +47,10 @@ export async function createGame(message) {
     if (!stale) {
       return api.sendMessage({
         chat_id: chatId,
-        text: 'В этом чате уже есть игра. Остановить её: /stop',
+        text: 'Игра уже идёт. Остановить: /stop',
       });
     }
-    await closeGame(existing, '✖️ Лобби закрыто — игра так и не началась.');
+    await closeGame(existing, '✖️ Игра так и не началась.');
   }
 
   const [game] = await db.insert(games).values({
@@ -76,8 +78,8 @@ export async function joinGame(game, user) {
     await api.sendMessage({
       chat_id: user.id,
       parse_mode: 'HTML',
-      text: `✅ Вы в игре${game.chatTitle ? ` в «${escapeHtml(game.chatTitle)}»` : ''}.\n`
-        + 'Когда начнётся раунд, сюда придут кнопки для хода.',
+      text: `✅ Вы в игре${game.chatTitle ? ` «${escapeHtml(game.chatTitle)}»` : ''}.\n`
+        + 'Ходить будете здесь.',
     });
   } catch (e) {
     if (e.code === 403 || e.code === 400) return 'no_dm';
@@ -91,17 +93,17 @@ export async function joinGame(game, user) {
 }
 
 export async function leaveGame(game, user) {
-  if (game.status !== 'lobby') return 'Игра уже началась.';
+  if (game.status !== 'lobby') return 'Игра уже идёт.';
   const res = await db.delete(gamePlayers)
     .where(and(eq(gamePlayers.gameId, game.id), eq(gamePlayers.userId, user.id))).run();
   if (res.rowsAffected === 0) return 'Вы не в игре.';
   await renderLobby(game);
-  return 'Вы вышли из игры.';
+  return 'Вы вышли.';
 }
 
 export async function setTarget(game, user, target) {
-  if (game.status !== 'lobby') return 'Игра уже началась.';
-  if (game.creatorId !== user.id) return 'Число побед выбирает создатель игры.';
+  if (game.status !== 'lobby') return 'Игра уже идёт.';
+  if (game.creatorId !== user.id) return 'Это выбирает создатель игры.';
   if (!TARGETS.includes(target)) return null;
   await db.update(games).set({ target }).where(eq(games.id, game.id)).run();
   await renderLobby({ ...game, target });
@@ -109,14 +111,14 @@ export async function setTarget(game, user, target) {
 }
 
 export async function startGame(game, user) {
-  if (game.status !== 'lobby') return 'Игра уже началась.';
-  if (game.creatorId !== user.id) return 'Начать игру может только её создатель.';
+  if (game.status !== 'lobby') return 'Игра уже идёт.';
+  if (game.creatorId !== user.id) return 'Начать может только создатель игры.';
   const count = await db.$count(gamePlayers, eq(gamePlayers.gameId, game.id));
-  if (count < 2) return 'Нужно хотя бы 2 участника.';
+  if (count < 2) return 'Нужно минимум 2 игрока.';
 
   const res = await db.update(games).set({ status: 'playing' })
     .where(and(eq(games.id, game.id), eq(games.status, 'lobby'))).run();
-  if (res.rowsAffected === 0) return 'Игра уже началась.';
+  if (res.rowsAffected === 0) return 'Игра уже идёт.';
 
   await safeEdit({ chat_id: game.chatId, message_id: game.msgId, ...(await lobbyView({ ...game, status: 'playing' })) });
   await startRound(game.id, 1);
@@ -128,13 +130,13 @@ export async function stopChatGame(message) {
   const game = await activeGame(message.chat.id);
   const refusal = game
     ? await stopGame(game, message.from.id)
-    : 'Сейчас нет активной игры. Начать: /rps';
+    : 'Игры нет. Начать: /rps';
   if (refusal) await api.sendMessage({ chat_id: message.chat.id, text: refusal });
 }
 
 // → null when stopped, otherwise why not.
 export async function stopGame(game, userId) {
-  if (!(await canManage(game, userId))) return 'Остановить игру может её создатель или админ чата.';
+  if (!(await canManage(game, userId))) return 'Остановить может создатель игры или админ.';
   await closeGame(game, '✖️ Игра остановлена.');
   return null;
 }
@@ -171,22 +173,20 @@ async function lobbyView(game) {
     : '<i>пока никого</i>';
   const lines = [
     '🪨✂️📄 <b>Камень, ножницы, бумага</b>',
+    `До ${game.target} ${winsWord(game.target)} · ${ROUND_SECONDS} сек на ход`,
     '',
-    `Играем до <b>${game.target}</b> ${winsWord(game.target)}. На ход — ${ROUND_SECONDS} секунд в личке с ботом; `
-      + 'кто не успел — проигрывает раунд.',
-    '',
-    `<b>Участники (${ps.length}):</b>`,
+    `<b>Игроки (${ps.length}):</b>`,
     list,
   ];
   if (game.status !== 'lobby') return { text: [...lines, '', '▶️ Игра началась!'].join('\n') };
 
-  lines.push('', 'Жмите «Войти», чтобы участвовать. Создатель выбирает число побед и нажимает «Старт».');
+  lines.push('', 'Жмите «Играть». Ходы — в чате с ботом.');
   return {
     text: lines.join('\n'),
     reply_markup: {
       inline_keyboard: [
         [
-          { text: '🙋 Войти', callback_data: `j:${game.id}` },
+          { text: '🙋 Играть', callback_data: `j:${game.id}` },
           { text: '🚪 Выйти', callback_data: `l:${game.id}` },
         ],
         TARGETS.map((n) => ({
@@ -220,7 +220,7 @@ async function startRound(gameId, round) {
         chat_id: p.userId,
         parse_mode: 'HTML',
         text: `⚔️ <b>Раунд ${round}</b>${game.chatTitle ? ` · ${escapeHtml(game.chatTitle)}` : ''}\n`
-          + `Ваш ход! У вас ${ROUND_SECONDS} секунд.`,
+          + `Ваш ход! ${ROUND_SECONDS} секунд.`,
         reply_markup: {
           inline_keyboard: [Object.keys(MOVES).map((move) => ({
             text: moveLabel(move),
@@ -235,35 +235,13 @@ async function startRound(gameId, round) {
       console.warn('round DM failed', { userId: p.userId, code: e.code });
     }
   }
-
-  const sent = await api.sendMessage({ chat_id: game.chatId, parse_mode: 'HTML', ...(await roundView(game, ps)) });
-  await db.update(games).set({ msgId: sent.message_id }).where(eq(games.id, gameId)).run();
-}
-
-async function roundView(game, ps) {
-  const lines = [
-    `⚔️ <b>Раунд ${game.round}</b> · до ${game.target} ${winsWord(game.target)}`,
-    `Счёт: ${scoreLine(ps)}`,
-    '',
-    `Ходы — в личке с ботом, ${ROUND_SECONDS} секунд:`,
-    ...ps.map((p) => `${p.move ? '✅' : '⏳'} ${escapeHtml(p.name)}`),
-  ];
-  return {
-    text: lines.join('\n'),
-    reply_markup: {
-      inline_keyboard: [[
-        { text: '🤖 Сделать ход', url: await botLink() },
-        { text: '⏰ Время вышло?', callback_data: `x:${game.id}` },
-      ]],
-    },
-  };
 }
 
 // Returns the toast for the player.
 export async function makeMove(query, gameId, round, move) {
   const game = await getGame(gameId);
   if (!game || game.status !== 'playing' || game.round !== round || game.deadline == null) {
-    return 'Этот раунд уже закончился.';
+    return 'Раунд уже закончился.';
   }
   if (Date.now() > game.deadline) {
     await resolveRound(gameId, round);
@@ -282,22 +260,21 @@ export async function makeMove(query, gameId, round, move) {
     await safeEdit({
       chat_id: query.message.chat.id,
       message_id: query.message.message_id,
-      text: `⚔️ <b>Раунд ${round}</b>\nВаш ход: ${moveLabel(move)}. Ждём остальных…`,
+      text: `⚔️ <b>Раунд ${round}</b>\nВы: ${moveLabel(move)}. Ждём других…`,
+      reply_markup: {
+        inline_keyboard: [[{ text: '⏰ Время вышло?', callback_data: `x:${gameId}` }]],
+      },
     });
   }
 
   const ps = await listPlayers(gameId);
-  if (ps.every((p) => p.move)) {
-    await resolveRound(gameId, round);
-  } else {
-    await safeEdit({ chat_id: game.chatId, message_id: game.msgId, ...(await roundView(game, ps)) });
-  }
+  if (ps.every((p) => p.move)) await resolveRound(gameId, round);
   return `Ваш ход: ${moveLabel(move)}`;
 }
 
 export async function checkTimeout(gameId) {
   const game = await getGame(gameId);
-  if (!game || game.status !== 'playing' || game.deadline == null) return 'Этот раунд уже закончился.';
+  if (!game || game.status !== 'playing' || game.deadline == null) return 'Раунд уже закончился.';
   const left = Math.ceil((game.deadline - GRACE_MS - Date.now()) / 1000);
   if (left > 0) return `Ещё ${left} сек.`;
   await resolveRound(gameId, game.round);
@@ -332,31 +309,30 @@ async function resolveRound(gameId, round) {
       .where(and(eq(gamePlayers.gameId, gameId), eq(gamePlayers.userId, p.userId))).run();
   }
 
-  const verdict = winners.length === 0
-    ? '🤝 Ничья — очко никому.'
-    : `⭐ Очко: ${winners.map((p) => `<b>${escapeHtml(p.name)}</b>`).join(', ')}`;
-  await safeEdit({
-    chat_id: game.chatId,
-    message_id: game.msgId,
-    text: [
-      `⚔️ <b>Раунд ${round} — итоги</b>`,
-      '',
-      ...ps.map((p) => `${escapeHtml(p.name)}: ${p.move ? moveLabel(p.move) : '⌛ не успел(а)'}${winners.includes(p) ? ' ⭐' : ''}`),
-      '',
-      verdict,
-      `Счёт: ${scoreLine(ps)}`,
-    ].join('\n'),
-  });
+  const winnerNames = winners.map((p) => `<b>${escapeHtml(p.name)}</b>`).join(', ');
+  const moveLines = ps.map((p) => `${escapeHtml(p.name)}: ${p.move ? moveLabel(p.move) : '⌛ не успел(а)'}${winners.includes(p) ? ' ⭐' : ''}`);
+  const score = `Счёт: ${scoreLine(ps)}`;
 
-  for (const p of late) {
-    if (p.dmMsgId) {
-      await safeEdit({ chat_id: p.userId, message_id: p.dmMsgId, text: `⌛ <b>Раунд ${round}</b>: время вышло — раунд проигран.` });
-    }
+  // The result goes to each player's private chat, in place of the move buttons.
+  for (const p of ps) {
+    if (!p.dmMsgId) continue;
+    let verdict;
+    if (winners.includes(p)) verdict = '⭐ Очко ваше!';
+    else if (winners.length === 0) verdict = '🤝 Ничья';
+    else if (!p.move) verdict = `⌛ Вы не успели. Очко: ${winnerNames}`;
+    else verdict = `❌ Очко: ${winnerNames}`;
+    await safeEdit({
+      chat_id: p.userId,
+      message_id: p.dmMsgId,
+      text: [`⚔️ <b>Раунд ${round}</b>`, '', ...moveLines, '', verdict, score].join('\n'),
+    });
   }
 
   if (movers.length === 0) {
     await db.update(games).set({ status: 'cancelled' }).where(eq(games.id, gameId)).run();
-    await api.sendMessage({ chat_id: game.chatId, text: '💤 Никто не сделал ход — игра остановлена.' });
+    const text = '💤 Никто не походил — игра остановлена.';
+    await api.sendMessage({ chat_id: game.chatId, text });
+    for (const p of ps) await sendPrivate(p.userId, text);
     return;
   }
 
@@ -382,30 +358,46 @@ async function finishGame(game, winner, ps) {
         wins = wins + excluded.wins
     `);
   }
+  const score = `Счёт: ${scoreLine(ps)}`;
   await api.sendMessage({
     chat_id: game.chatId,
     parse_mode: 'HTML',
     text: [
-      `🏆 <b>Победитель — ${escapeHtml(winner.name)}!</b>`,
+      `🏆 <b>Победил(а) ${escapeHtml(winner.name)}!</b>`,
+      score,
       '',
-      `Итоговый счёт: ${scoreLine(ps)}`,
-      '',
-      'Ещё партию? /rps',
+      'Ещё раз? /rps',
     ].join('\n'),
   });
+
+  for (const p of ps) {
+    await sendPrivate(p.userId, [
+      p === winner ? '🏆 <b>Вы победили!</b>' : `😔 Победил(а) <b>${escapeHtml(winner.name)}</b>`,
+      score,
+    ].join('\n'));
+  }
+}
+
+// A message to a player's private chat; they may have blocked the bot since.
+async function sendPrivate(userId, text) {
+  try {
+    await api.sendMessage({ chat_id: userId, parse_mode: 'HTML', text });
+  } catch (e) {
+    console.warn('private message failed', { userId, code: e.code });
+  }
 }
 
 // ---------------------------------------------------------------- stats
 
 export async function statsText(user) {
   const p = await db.select().from(players).where(eq(players.userId, user.id)).get();
-  if (!p) return 'Вы ещё не доиграли ни одной партии.';
-  return `📊 <b>${escapeHtml(p.name)}</b>\nПартий: ${p.games}\n🏆 Побед: ${p.wins} (${Math.round((p.wins / p.games) * 100)}%)`;
+  if (!p) return 'Вы ещё не сыграли ни одной игры.';
+  return `📊 <b>${escapeHtml(p.name)}</b>\nИгр: ${p.games}\n🏆 Побед: ${p.wins} (${Math.round((p.wins / p.games) * 100)}%)`;
 }
 
 export async function topText() {
   const rows = await db.select().from(players).orderBy(desc(players.wins), asc(players.games)).limit(10);
-  if (rows.length === 0) return 'Пока никто не доиграл ни одной партии.';
+  if (rows.length === 0) return 'Пока никто не играл.';
   const medals = ['🥇', '🥈', '🥉'];
   return [
     '🏆 <b>Лучшие игроки</b>',

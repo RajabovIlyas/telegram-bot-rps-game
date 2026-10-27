@@ -5,18 +5,17 @@ import { ADMIN_IDS } from './users.js';
 
 const GROUP = [
   { command: 'rps', description: '🎮 Начать игру' },
+  { command: 'start', description: '🎮 Начать игру' },
   { command: 'stop', description: '✖️ Остановить игру' },
   { command: 'stats', description: '📊 Моя статистика' },
   { command: 'top', description: '🏆 Лучшие игроки' },
 ];
 
 const PRIVATE = [
-  { command: 'start', description: '❓ Как начать игру' },
+  { command: 'start', description: '❓ Как играть' },
   { command: 'stats', description: '📊 Моя статистика' },
   { command: 'top', description: '🏆 Лучшие игроки' },
 ];
-
-const ADMIN = [...PRIVATE, { command: 'users', description: '👥 Пользователи' }];
 
 // The runtime has no deploy hook, so the menu is (re)set once per isolate,
 // on the first update it handles.
@@ -32,7 +31,9 @@ export function ensureCommands() {
 async function setCommands() {
   await api.setMyCommands({ commands: GROUP, scope: { type: 'all_group_chats' } });
   await api.setMyCommands({ commands: PRIVATE, scope: { type: 'all_private_chats' } });
+  // /users stays out of the menu (it still works when typed). Admins used to get
+  // a per-chat menu with it, which would override the one above — clear it.
   for (const id of ADMIN_IDS) {
-    await api.setMyCommands({ commands: ADMIN, scope: { type: 'chat', chat_id: id } });
+    await api.deleteMyCommands({ scope: { type: 'chat', chat_id: id } });
   }
 }

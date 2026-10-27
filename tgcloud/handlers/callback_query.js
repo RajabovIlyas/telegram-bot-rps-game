@@ -13,8 +13,8 @@ import {
 const JOIN_REPLIES = {
   ok: 'Вы в игре!',
   already: 'Вы уже в игре.',
-  closed: 'Игра уже началась.',
-  full: 'Мест больше нет.',
+  closed: 'Игра уже идёт.',
+  full: 'Мест нет.',
 };
 
 export default async function (query) {
@@ -40,7 +40,7 @@ export default async function (query) {
   } else if (kind === 's') {
     answer.text = await startGame(game, query.from);
   } else if (kind === 'c') {
-    answer.text = (await stopGame(game, query.from.id)) ?? 'Игра отменена.';
+    answer.text = (await stopGame(game, query.from.id)) ?? 'Игра остановлена.';
   } else if (kind === 'x') {
     answer.text = await checkTimeout(game.id);
   } else if (kind === 'm' && isMove(b)) {

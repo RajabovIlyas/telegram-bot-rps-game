@@ -1,5 +1,5 @@
 // handlers/message.js — commands. In a group: /rps (/rpc, /start) opens a game,
-// /stop ends it. In private: /start join_<id> (the deep link from "Войти").
+// /stop ends it. In private: /start join_<id> (the deep link from "Играть").
 
 import { api } from 'sdk';
 import { botUsername } from '../lib/rps.js';
@@ -10,11 +10,13 @@ import { createGame, getGame, joinGame, stopChatGame, sweepExpired, statsText, t
 const HELP = [
   '🪨✂️📄 <b>Камень, ножницы, бумага</b>',
   '',
-  'Добавьте меня в группу и напишите там /rps — откроется лобби.',
-  'Участники жмут «Войти», создатель выбирает, до скольки побед играть, и жмёт «Старт».',
-  'Ходы делаются здесь, в личке со мной. Кто не выбрал за 30 секунд — проигрывает раунд.',
+  '1. Добавьте меня в группу.',
+  '2. Напишите там /rps.',
+  '3. Жмите «Играть», а ходите здесь, в этом чате.',
   '',
-  '/stats — ваша статистика',
+  'На ход — 30 секунд.',
+  '',
+  '/stats — моя статистика',
   '/top — лучшие игроки',
 ].join('\n');
 
@@ -60,9 +62,9 @@ async function joinFromLink(user, gameId) {
   const result = game ? await joinGame(game, user) : 'closed';
   // On 'ok' joinGame has already confirmed in this chat.
   const replies = {
-    already: 'Вы уже в этой игре.',
-    closed: 'Эта игра уже началась или закончилась.',
-    full: 'В игре уже нет мест.',
+    already: 'Вы уже в игре.',
+    closed: 'Эта игра уже идёт или закончилась.',
+    full: 'Мест нет.',
   };
   if (replies[result]) await send(user.id, replies[result]);
 }
